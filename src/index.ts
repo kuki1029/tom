@@ -29,6 +29,8 @@ const DEFAULT_CONFIG: Config = {
   continueRun: false,
   noReview: false,
   branchPrefix: getDefaultBranchPrefix(),
+  baseBranch: "main",
+  repoBranches: {},
   skipChat: false,
 }
 
@@ -221,12 +223,18 @@ const ensureTomDir = (cwd: string, clean: boolean): string => {
 
 // ========= Git =========
 
-const getMainBranch = (cwd: string): string => {
+const getBaseBranch = (dir: string, config: Config): string => {
+  const repoName = path.basename(dir)
+  // Per-repo override first
+  if (config.repoBranches[repoName]) return config.repoBranches[repoName]
+  // Then global config
+  if (config.baseBranch !== "main") return config.baseBranch
+  // Then detect from git
   try {
-    return execSync("git symbolic-ref refs/remotes/origin/HEAD", { cwd, stdio: "pipe" })
+    return execSync("git symbolic-ref refs/remotes/origin/HEAD", { cwd: dir, stdio: "pipe" })
       .toString().trim().replace("refs/remotes/origin/", "")
   } catch {
-    return "main"
+    return config.baseBranch
   }
 }
 
@@ -240,12 +248,12 @@ const toBranchName = (task: string, prefix: string): string => {
   return `${prefix}${slug}`
 }
 
-const createBranch = (cwd: string, task: string, prefix: string, repos: string[]): void => {
+const createBranch = (cwd: string, task: string, prefix: string, repos: string[], config: Config): void => {
   const branch = toBranchName(task, prefix)
   const targets = repos.length ? repos.map(r => path.join(cwd, r)) : [cwd]
 
   for (const dir of targets) {
-    const mainBranch = getMainBranch(dir)
+    const mainBranch = getBaseBranch(dir, config)
     const repoName = path.basename(dir)
 
     try {
@@ -309,21 +317,26 @@ const createPR = async (cwd: string, config: Config): Promise<void> => {
 
 // ========= Sync =========
 
-const syncWithMain = (cwd: string, targetBranch?: string): void => {
+const syncWithMain = (cwd: string, config: Config, targetBranch?: string): void => {
   const repos = detectRepos(cwd)
   const targets = repos.length ? repos.map(r => path.join(cwd, r)) : [cwd]
 
   for (const dir of targets) {
     const repoName = repos.length ? path.basename(dir) : "project"
-    const mainBranch = getMainBranch(dir)
+    const mainBranch = getBaseBranch(dir, config)
 
     try {
       // Always fetch first
       execSync(`git fetch origin ${mainBranch}`, { cwd: dir, stdio: "pipe" })
 
-      // Switch to target branch if specified
+      // Switch to target branch if specified — create from main if it doesn't exist
       if (targetBranch) {
-        execSync(`git checkout ${targetBranch}`, { cwd: dir, stdio: "pipe" })
+        try {
+          execSync(`git checkout ${targetBranch}`, { cwd: dir, stdio: "pipe" })
+        } catch {
+          execSync(`git checkout -b ${targetBranch} origin/${mainBranch}`, { cwd: dir, stdio: "pipe" })
+          console.log(`  ${repoName}: created ${targetBranch} from origin/${mainBranch}`)
+        }
       }
 
       const currentBranch = execSync("git branch --show-current", { cwd: dir, stdio: "pipe" })
@@ -562,7 +575,7 @@ const run = async (task: string, config: Config): Promise<void> => {
 
   // Create branch in all repos
   if (!config.noBranch) {
-    createBranch(cwd, contract.task, config.branchPrefix, repos)
+    createBranch(cwd, contract.task, config.branchPrefix, repos, config)
   }
 
   // Pre-flight TSC check
@@ -627,7 +640,7 @@ if (subcommand === "status") {
 } else if (subcommand === "sync") {
   // tom sync [branch] — merge main into current or given branch
   const branchArg = process.argv[process.argv.indexOf("sync") + 1]
-  syncWithMain(process.cwd(), branchArg)
+  syncWithMain(process.cwd(), config, branchArg)
 } else if (subcommand === "pr") {
   createPR(process.cwd(), config).catch((err) => {
     console.error(`\nFatal: ${err.message}`)

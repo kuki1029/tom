@@ -55,6 +55,8 @@ export interface Config {
   continueRun: boolean
   noReview: boolean
   branchPrefix: string
+  baseBranch: string
+  repoBranches: Record<string, string>
   skipChat: boolean
   customPrompt?: string
   mcpConfig?: string
