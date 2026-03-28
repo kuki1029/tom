@@ -388,38 +388,27 @@ const runDiscovery = (cwd: string, task: string, repos: string[]): void => {
     "This document feeds directly into the planner. Be precise.",
   ].join("\n")
 
+  // Put the task in the system prompt so Claude has it as context
+  // and immediately starts exploring when the user sends any message
+  const fullPrompt = [
+    systemPrompt,
+    "",
+    `## Task to explore`,
+    "",
+    `${task}${repoContext}`,
+    "",
+    "Start by reading the relevant code for this task. Share your initial findings and ask clarifying questions.",
+    "The user's first message will kick things off — dive straight into exploring.",
+  ].join("\n")
+
   printPhaseBanner("DISCOVERY")
   console.log("  Chat with the architect. Explore the codebase, refine the task.")
   console.log("  Type /exit when ready to proceed to planning.\n")
 
-  // First pass: send task with full tools so Claude explores the codebase
-  const firstRun = spawnSync("claude", [
-    "-p", `${task}${repoContext}\n\nExplore the codebase for this. Read relevant code, share initial findings, and ask clarifying questions.`,
-    "--append-system-prompt", systemPrompt,
-    "--output-format", "stream-json",
-    "--verbose",
-    "--dangerously-skip-permissions",
-  ], { cwd, stdio: ["ignore", "pipe", "inherit"] })
-
-  // Parse session ID from stream-json output
-  let sessionId: string | undefined
-  const lines = firstRun.stdout.toString().split("\n")
-  for (const line of lines) {
-    try {
-      const event = JSON.parse(line.trim())
-      if (event.type === "result") {
-        sessionId = event.session_id
-      }
-    } catch { /* skip */ }
-  }
-
-  // Resume interactively — user continues the conversation with full context
-  if (sessionId) {
-    spawnSync("claude", ["--resume", sessionId], { cwd, stdio: "inherit" })
-  } else {
-    // Fallback: open fresh interactive session with system prompt
-    spawnSync("claude", ["--append-system-prompt", systemPrompt], { cwd, stdio: "inherit" })
-  }
+  spawnSync("claude", ["--append-system-prompt", fullPrompt], {
+    cwd,
+    stdio: "inherit",
+  })
 }
 
 // ========= Interactive Session =========
