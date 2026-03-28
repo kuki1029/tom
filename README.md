@@ -179,6 +179,10 @@ Agents communicate via `.tom/` in your project root:
 - **Pre-flight checks** — TSC before generator starts
 - **Desktop notifications** — walk away, come back when done
 
+## Contributing
+
+[Open an issue](https://github.com/kuki1029/tom/issues) for bugs or feature requests. PRs welcome.
+
 ## License
 
 MIT — Kunal Varkekar

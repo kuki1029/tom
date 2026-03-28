@@ -55,7 +55,7 @@ const loadProjectConfig = (cwd: string): Partial<Config> => {
 
 // ========= CLI Parsing =========
 
-const SUBCOMMANDS = ["status", "pr"] as const
+const SUBCOMMANDS = ["status", "pr", "sync"] as const
 type Subcommand = typeof SUBCOMMANDS[number]
 
 const parseCliArgs = (): { task: string; config: Config; subcommand?: Subcommand } => {
@@ -89,6 +89,7 @@ const parseCliArgs = (): { task: string; config: Config; subcommand?: Subcommand
   tom <task> [options]
   tom status                    Show current .tom/ state
   tom pr                        Create PR from .tom/ artifacts
+  tom sync [branch]             Fetch main + merge into current (or given) branch
 
   Arguments:
     task                    What to build (quoted string)
@@ -304,6 +305,42 @@ const createPR = async (cwd: string, config: Config): Promise<void> => {
   }
 
   printCostSummary([result])
+}
+
+// ========= Sync =========
+
+const syncWithMain = (cwd: string, targetBranch?: string): void => {
+  const repos = detectRepos(cwd)
+  const targets = repos.length ? repos.map(r => path.join(cwd, r)) : [cwd]
+
+  for (const dir of targets) {
+    const repoName = repos.length ? path.basename(dir) : "project"
+    const mainBranch = getMainBranch(dir)
+
+    try {
+      // Always fetch first
+      execSync(`git fetch origin ${mainBranch}`, { cwd: dir, stdio: "pipe" })
+
+      // Switch to target branch if specified
+      if (targetBranch) {
+        execSync(`git checkout ${targetBranch}`, { cwd: dir, stdio: "pipe" })
+      }
+
+      const currentBranch = execSync("git branch --show-current", { cwd: dir, stdio: "pipe" })
+        .toString().trim()
+
+      if (currentBranch === mainBranch) {
+        execSync(`git pull origin ${mainBranch}`, { cwd: dir, stdio: "pipe" })
+        console.log(`  ${repoName}: pulled latest ${mainBranch}`)
+      } else {
+        execSync(`git merge origin/${mainBranch}`, { cwd: dir, stdio: "pipe" })
+        console.log(`  ${repoName}: merged origin/${mainBranch} into ${currentBranch}`)
+      }
+    } catch (err) {
+      const msg = getExecError(err)
+      console.error(`  ${repoName}: sync failed — ${msg.trim()}`)
+    }
+  }
 }
 
 // ========= Discovery Chat =========
@@ -587,17 +624,18 @@ const { task, config, subcommand } = parseCliArgs()
 
 if (subcommand === "status") {
   printStatus(process.cwd())
-  process.exit(0)
-}
-
-if (subcommand === "pr") {
+} else if (subcommand === "sync") {
+  // tom sync [branch] — merge main into current or given branch
+  const branchArg = process.argv[process.argv.indexOf("sync") + 1]
+  syncWithMain(process.cwd(), branchArg)
+} else if (subcommand === "pr") {
   createPR(process.cwd(), config).catch((err) => {
     console.error(`\nFatal: ${err.message}`)
     process.exit(1)
   })
+} else {
+  run(task, config).catch((err) => {
+    console.error(`\nFatal: ${err.message}`)
+    process.exit(1)
+  })
 }
-
-run(task, config).catch((err) => {
-  console.error(`\nFatal: ${err.message}`)
-  process.exit(1)
-})
