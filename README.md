@@ -4,6 +4,10 @@ Multi-agent coding harness for [Claude Code](https://docs.anthropic.com/en/docs/
 
 Inspired by Anthropic's [long-running agent harnesses](https://www.anthropic.com/engineering/harness-design-long-running-apps) and their [autonomous-coding quickstart](https://github.com/anthropics/claude-quickstarts/tree/main/autonomous-coding).
 
+## Human Text
+
+Hey! Although this entire thing is Claude generated. This bit is written by me. This is a little tool I made to make my workflow easier. It follows Anthropics article on the agent harness and makes use of Claude Code and some pre built prompts to just quick start everything needed for a new feature. It has some configs to make it customizable as needed. Feel free to open issues or PR's if you want a new feature. Anything that can help make our lives easier to code faster and better is appreciated. Thank you!
+
 ## Quick Start
 
 ```bash
