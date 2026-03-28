@@ -1,0 +1,34 @@
+{
+  "name": "tom-agent",
+  "version": "0.1.0",
+  "description": "3-agent coding harness for Claude Code: Planner → Generator → Evaluator",
+  "type": "module",
+  "bin": {
+    "tom": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "ai",
+    "agent",
+    "coding-agent",
+    "planner",
+    "evaluator",
+    "harness"
+  ],
+  "author": "Kunal Varkekar",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "tsx": "^4.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}
