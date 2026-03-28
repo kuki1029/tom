@@ -89,7 +89,7 @@ interface ResultEvent {
 type StreamEvent = AssistantEvent | ResultEvent | { type: string }
 
 const shortPath = (p: string): string =>
-  String(p).replace(/^.*?\/(frontend|backend)\//, "$1/")
+  String(p).replace(/^.*?\/(frontend|backend|automations)\//, "$1/")
 
 const formatToolCall = (name: string, input: Record<string, unknown>): string => {
   const path = input.file_path ? shortPath(input.file_path as string) : ""

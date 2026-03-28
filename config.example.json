@@ -1,0 +1,12 @@
+{
+  "branchPrefix": "yourname/feat-",
+  "baseBranch": "main",
+  "model": "opus",
+  "maxIterations": 4,
+  "skipChat": false,
+  "repoBranches": {
+    "automations": "staging"
+  },
+  "reviewCommand": "/tira-review",
+  "customPrompt": "Use MongoDB MCP to verify DB state. For auth testing, use getTestToken() from src/helpers/auth.ts."
+}

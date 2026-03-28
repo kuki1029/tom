@@ -12,7 +12,13 @@ export const parseContract = (tomDir: string): Contract => {
   }
 
   const raw = fs.readFileSync(contractPath, "utf-8")
-  const contract: Contract = JSON.parse(raw)
+
+  let contract: Contract
+  try {
+    contract = JSON.parse(raw)
+  } catch {
+    throw new Error(`contract.json contains invalid JSON. Check planner output.`)
+  }
 
   if (!contract.task || !contract.criteria?.length) {
     throw new Error(

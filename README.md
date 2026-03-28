@@ -108,6 +108,8 @@ Use `customPrompt` for project-specific instructions that all agents should foll
 }
 ```
 
+See [`config.example.json`](config.example.json) for a full example. Copy it to `.tom/config.json` and customize.
+
 CLI flags override config values.
 
 ## Options
