@@ -58,7 +58,7 @@ const loadProjectConfig = (cwd: string): Partial<Config> => {
 
 // ========= CLI Parsing =========
 
-const SUBCOMMANDS = ["status", "pr", "sync"] as const
+const SUBCOMMANDS = ["status", "pr", "sync", "watch"] as const
 type Subcommand = typeof SUBCOMMANDS[number]
 
 const parseCliArgs = (): { task: string; config: Config; subcommand?: Subcommand } => {
@@ -93,6 +93,7 @@ const parseCliArgs = (): { task: string; config: Config; subcommand?: Subcommand
   tom status                    Show current .tom/ state
   tom pr                        Create PR from .tom/ artifacts
   tom sync [branch]             Fetch main + merge into current (or given) branch
+  tom watch                     Monitor all tom sessions across worktrees
 
   Arguments:
     task                    What to build (quoted string)
@@ -355,6 +356,177 @@ const syncWithMain = (cwd: string, config: Config, targetBranch?: string): void 
       console.error(`  ${repoName}: sync failed — ${msg.trim()}`)
     }
   }
+}
+
+// ========= Watch =========
+
+interface SessionInfo {
+  name: string
+  path: string
+  state: string
+  details: string
+  isRunning: boolean
+  lastModified: number
+}
+
+const findTomSessions = (cwd: string): string[] => {
+  const sessions: string[] = []
+
+  // Check current dir
+  if (fs.existsSync(path.join(cwd, ".tom", "contract.json"))) {
+    sessions.push(cwd)
+  }
+
+  // Check immediate subdirs (worktrees pattern: worktrees/beta/.tom/)
+  try {
+    const entries = fs.readdirSync(cwd, { withFileTypes: true })
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const subdir = path.join(cwd, entry.name)
+
+      if (fs.existsSync(path.join(subdir, ".tom", "contract.json"))) {
+        sessions.push(subdir)
+      }
+
+      // One level deeper (Ergo/worktrees/beta/.tom/)
+      try {
+        const subEntries = fs.readdirSync(subdir, { withFileTypes: true })
+        for (const sub of subEntries) {
+          if (!sub.isDirectory()) continue
+          const deepDir = path.join(subdir, sub.name)
+          if (fs.existsSync(path.join(deepDir, ".tom", "contract.json"))) {
+            sessions.push(deepDir)
+          }
+        }
+      } catch { /* skip */ }
+    }
+  } catch { /* skip */ }
+
+  return [...new Set(sessions)] // dedupe
+}
+
+const isClaudeRunning = (dir: string): boolean => {
+  try {
+    const ps = execSync("ps aux", { stdio: "pipe" }).toString()
+    return ps.includes(dir) && ps.includes("claude")
+  } catch {
+    return false
+  }
+}
+
+const getLatestModTime = (tomDir: string): number => {
+  const files = ["plan.md", "contract.json", "handoff.md", "critique.md", "review.md"]
+  let latest = 0
+  for (const file of files) {
+    try {
+      const stat = fs.statSync(path.join(tomDir, file))
+      if (stat.mtimeMs > latest) latest = stat.mtimeMs
+    } catch { /* skip */ }
+  }
+  return latest
+}
+
+const getSessionInfo = (dir: string): SessionInfo => {
+  const tomDir = path.join(dir, ".tom")
+  const name = path.basename(dir)
+  const running = isClaudeRunning(dir)
+  const lastMod = getLatestModTime(tomDir)
+  const minutesAgo = Math.round((Date.now() - lastMod) / 60000)
+
+  const hasCritique = fs.existsSync(path.join(tomDir, "critique.md"))
+  const hasHandoff = fs.existsSync(path.join(tomDir, "handoff.md"))
+  const hasReview = fs.existsSync(path.join(tomDir, "review.md"))
+
+  let state: string
+  let details: string
+
+  if (hasCritique) {
+    const critique = parseCritique(tomDir)
+    const passed = critique.results.filter(r => r.passed).length
+    const total = critique.results.length
+    if (allPassed(critique)) {
+      state = hasReview ? "COMPLETE" : "PASS"
+      details = `${passed}/${total} criteria`
+    } else {
+      state = running ? "FIXING" : "FAIL"
+      details = `${passed}/${total} criteria`
+    }
+  } else if (hasHandoff) {
+    state = running ? "EVALUATING" : "AWAITING EVAL"
+    details = ""
+  } else {
+    state = running ? "GENERATING" : "PLANNED"
+    details = ""
+  }
+
+  if (running && minutesAgo > 5) {
+    state = "STUCK?"
+    details = `no file changes in ${minutesAgo}m`
+  }
+
+  return { name, path: dir, state, details, isRunning: running, lastModified: lastMod }
+}
+
+const DIM_W = "\x1b[2m"
+const BOLD_W = "\x1b[1m"
+const GREEN_W = "\x1b[32m"
+const RED_W = "\x1b[31m"
+const YELLOW_W = "\x1b[33m"
+const CYAN_W = "\x1b[36m"
+const RESET_W = "\x1b[0m"
+
+const stateColor = (state: string): string => {
+  if (state === "COMPLETE" || state === "PASS") return GREEN_W
+  if (state === "FAIL") return RED_W
+  if (state === "STUCK?") return YELLOW_W
+  if (state.includes("ING")) return CYAN_W
+  return DIM_W
+}
+
+const printWatch = (sessions: SessionInfo[]): void => {
+  // Clear screen
+  process.stdout.write("\x1b[2J\x1b[H")
+
+  console.log(`${BOLD_W}${CYAN_W}  TOM WATCH${RESET_W}  ${DIM_W}${new Date().toLocaleTimeString()}${RESET_W}\n`)
+
+  if (sessions.length === 0) {
+    console.log(`  ${DIM_W}No active tom sessions found.${RESET_W}\n`)
+    return
+  }
+
+  for (const s of sessions) {
+    const color = stateColor(s.state)
+    const icon = s.state === "COMPLETE" || s.state === "PASS" ? "✓"
+      : s.state === "FAIL" ? "✗"
+      : s.state === "STUCK?" ? "⚠"
+      : s.isRunning ? "●"
+      : "·"
+    const details = s.details ? `  ${DIM_W}${s.details}${RESET_W}` : ""
+    console.log(`  ${color}${icon}${RESET_W}  ${BOLD_W}${s.name.padEnd(15)}${RESET_W} ${color}${s.state.padEnd(14)}${RESET_W}${details}`)
+  }
+
+  console.log(`\n  ${DIM_W}Refreshing every 30s. Ctrl+C to stop.${RESET_W}\n`)
+}
+
+const runWatch = (cwd: string): void => {
+  const tick = (): void => {
+    const sessionPaths = findTomSessions(cwd)
+    const sessions = sessionPaths.map(getSessionInfo)
+    printWatch(sessions)
+
+    // Notify on completion or stuck
+    for (const s of sessions) {
+      if (s.state === "COMPLETE" || s.state === "PASS") {
+        notify("Tom", `${s.name}: all criteria passed`)
+      }
+      if (s.state === "STUCK?") {
+        notify("Tom", `${s.name}: possibly stuck`)
+      }
+    }
+  }
+
+  tick()
+  setInterval(tick, 30000)
 }
 
 // ========= Discovery Chat =========
@@ -659,6 +831,8 @@ if (subcommand === "status") {
   // tom sync [branch] — merge main into current or given branch
   const branchArg = process.argv[process.argv.indexOf("sync") + 1]
   syncWithMain(process.cwd(), config, branchArg)
+} else if (subcommand === "watch") {
+  runWatch(process.cwd())
 } else if (subcommand === "pr") {
   createPR(process.cwd(), config).catch((err) => {
     console.error(`\nFatal: ${err.message}`)
