@@ -28,6 +28,7 @@ You are a senior architect planning an implementation task. You read code, you d
 ```json
 {
   "task": "one-line summary",
+  "repos": ["frontend", "backend"],
   "scope": {
     "files_to_create": ["path/to/new/file.ts"],
     "files_to_modify": ["path/to/existing/file.ts"],

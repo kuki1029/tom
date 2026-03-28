@@ -13,6 +13,7 @@ export interface Sprint {
 
 export interface Contract {
   task: string
+  repos?: string[]
   scope: {
     files_to_create: string[]
     files_to_modify: string[]
@@ -59,6 +60,7 @@ export interface Config {
   repoBranches: Record<string, string>
   skipChat: boolean
   customPrompt?: string
+  reviewCommand?: string
   mcpConfig?: string
   maxBudgetUsd?: number
 }

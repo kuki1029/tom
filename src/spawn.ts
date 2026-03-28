@@ -13,7 +13,7 @@ const buildPromptPath = (role: AgentRole): string =>
 const buildPermissions = (_role: AgentRole): string[] =>
   ["--dangerously-skip-permissions"]
 
-const buildBasePrompt = (role: AgentRole, task: string, cwd: string, iteration: number): string => {
+const buildBasePrompt = (role: AgentRole, task: string, cwd: string, iteration: number, config: Config): string => {
   switch (role) {
     case "planner":
       return `Task: ${task}\n\nProject: ${cwd}\n\nRead the codebase and produce .tom/plan.md and .tom/contract.json following the instructions in your system prompt.`
@@ -24,15 +24,16 @@ const buildBasePrompt = (role: AgentRole, task: string, cwd: string, iteration: 
     case "evaluator":
       return `Read .tom/contract.json and evaluate the implementation. Write test scripts to .tom/test-scripts/, run them, and write your verdict to .tom/critique.md.`
     case "reviewer":
-      return `Task: ${task}\n\nReview all changes made in this session. Read .tom/plan.md and .tom/contract.json for context. Write your review to .tom/review.md.`
+      return config.reviewCommand
+        ?? `Task: ${task}\n\nReview all changes made in this session. Read .tom/plan.md and .tom/contract.json for context. Write your review to .tom/review.md.`
     case "pr":
       return `Organize commits, push the branch, and create a pull request. Read .tom/ artifacts for context.`
   }
 }
 
-const buildUserPrompt = (role: AgentRole, task: string, cwd: string, iteration: number, customPrompt?: string): string => {
-  const base = buildBasePrompt(role, task, cwd, iteration)
-  return customPrompt ? `${base}\n\nProject-specific instructions:\n${customPrompt}` : base
+const buildUserPrompt = (role: AgentRole, task: string, cwd: string, iteration: number, config: Config): string => {
+  const base = buildBasePrompt(role, task, cwd, iteration, config)
+  return config.customPrompt ? `${base}\n\nProject-specific instructions:\n${config.customPrompt}` : base
 }
 
 interface SpawnOptions {
@@ -131,7 +132,7 @@ export const spawnAgent = ({ role, task, cwd, config, iteration = 0, resumeSessi
 
     const args = [
       // Resume existing session or start fresh
-      ...(isResume ? ["--resume", resumeSessionId, "-p", task] : ["-p", buildUserPrompt(role, task, cwd, iteration, config.customPrompt)]),
+      ...(isResume ? ["--resume", resumeSessionId, "-p", task] : ["-p", buildUserPrompt(role, task, cwd, iteration, config)]),
       "--output-format", "stream-json",
       "--verbose",
       "--model", config.model,

@@ -361,11 +361,9 @@ const syncWithMain = (cwd: string, config: Config, targetBranch?: string): void 
 const runDiscovery = (cwd: string, task: string, repos: string[]): void => {
   const repoContext = repos.length > 1 ? `\nRepos: ${repos.join(", ")}` : ""
 
-  const prompt = [
+  const systemPrompt = [
     "You are a senior software architect helping design a feature for an enterprise-grade product.",
     "No shortcuts, no workarounds, no time pressure. Build it right, build it to last.",
-    "",
-    `The user is exploring this idea: ${task}${repoContext}`,
     "",
     "## Your job in this session",
     "",
@@ -394,10 +392,34 @@ const runDiscovery = (cwd: string, task: string, repos: string[]): void => {
   console.log("  Chat with the architect. Explore the codebase, refine the task.")
   console.log("  Type /exit when ready to proceed to planning.\n")
 
-  spawnSync("claude", ["--append-system-prompt", prompt], {
-    cwd,
-    stdio: "inherit",
-  })
+  // First pass: send task with full tools so Claude explores the codebase
+  const firstRun = spawnSync("claude", [
+    "-p", `${task}${repoContext}\n\nExplore the codebase for this. Read relevant code, share initial findings, and ask clarifying questions.`,
+    "--append-system-prompt", systemPrompt,
+    "--output-format", "stream-json",
+    "--verbose",
+    "--dangerously-skip-permissions",
+  ], { cwd, stdio: ["ignore", "pipe", "inherit"] })
+
+  // Parse session ID from stream-json output
+  let sessionId: string | undefined
+  const lines = firstRun.stdout.toString().split("\n")
+  for (const line of lines) {
+    try {
+      const event = JSON.parse(line.trim())
+      if (event.type === "result") {
+        sessionId = event.session_id
+      }
+    } catch { /* skip */ }
+  }
+
+  // Resume interactively — user continues the conversation with full context
+  if (sessionId) {
+    spawnSync("claude", ["--resume", sessionId], { cwd, stdio: "inherit" })
+  } else {
+    // Fallback: open fresh interactive session with system prompt
+    spawnSync("claude", ["--append-system-prompt", systemPrompt], { cwd, stdio: "inherit" })
+  }
 }
 
 // ========= Interactive Session =========
@@ -573,9 +595,10 @@ const run = async (task: string, config: Config): Promise<void> => {
     }
   }
 
-  // Create branch in all repos
+  // Create branch only in repos the planner identified (or all if not specified)
+  const targetRepos = contract.repos?.length ? contract.repos : repos
   if (!config.noBranch) {
-    createBranch(cwd, contract.task, config.branchPrefix, repos, config)
+    createBranch(cwd, contract.task, config.branchPrefix, targetRepos, config)
   }
 
   // Pre-flight TSC check
