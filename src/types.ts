@@ -32,7 +32,7 @@ export interface AgentResult {
   isError: boolean
 }
 
-export type AgentRole = "planner" | "generator" | "evaluator" | "reviewer" | "pr"
+export type AgentRole = "discovery" | "planner" | "generator" | "evaluator" | "reviewer" | "pr"
 
 export interface CritiqueResult {
   id: string

@@ -15,6 +15,8 @@ const buildPermissions = (_role: AgentRole): string[] =>
 
 const buildBasePrompt = (role: AgentRole, task: string, cwd: string, iteration: number, config: Config): string => {
   switch (role) {
+    case "discovery":
+      return task // discovery passes the full prompt directly
     case "planner":
       return `Task: ${task}\n\nProject: ${cwd}\n\nRead the codebase and produce .tom/plan.md and .tom/contract.json following the instructions in your system prompt.`
     case "generator":
@@ -137,10 +139,10 @@ export const spawnAgent = ({ role, task, cwd, config, iteration = 0, resumeSessi
       "--verbose",
       "--model", config.model,
       "--effort", "high",
-      // Don't persist sessions except for planner (needed for resume on tweaks)
-      ...(role === "planner" ? [] : ["--no-session-persistence"]),
-      // Only append system prompt on fresh sessions (resume already has it)
-      ...(isResume ? [] : ["--append-system-prompt-file", buildPromptPath(role)]),
+      // Don't persist sessions except for planner/discovery (needed for resume)
+      ...(role === "planner" || role === "discovery" ? [] : ["--no-session-persistence"]),
+      // Only append system prompt on fresh sessions (resume already has it). Discovery handles its own prompt.
+      ...(isResume || role === "discovery" ? [] : ["--append-system-prompt-file", buildPromptPath(role)]),
       ...buildPermissions(role),
     ]
 

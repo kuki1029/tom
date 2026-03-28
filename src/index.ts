@@ -359,7 +359,7 @@ const syncWithMain = (cwd: string, config: Config, targetBranch?: string): void 
 
 // ========= Discovery Chat =========
 
-const runDiscovery = (cwd: string, task: string, repos: string[]): void => {
+const runDiscovery = async (cwd: string, task: string, repos: string[], config: Config): Promise<void> => {
   const repoContext = repos.length > 1 ? `\nRepos: ${repos.join(", ")}` : ""
 
   const systemPrompt = [
@@ -392,24 +392,29 @@ const runDiscovery = (cwd: string, task: string, repos: string[]): void => {
   printPhaseBanner("DISCOVERY")
   console.log("  Exploring the codebase. You'll be able to chat after.\n")
 
-  // Step 1: Auto-explore with -p — user sees output in real time (stdio inherit)
-  // Use a fixed session ID so we can resume it
-  const sessionId = crypto.randomUUID()
+  // Step 1: Auto-explore using spawnAgent — shows tool calls + thinking in real time
+  const result = await spawnAgent({
+    role: "discovery",
+    task: `${task}${repoContext}\n\nExplore the codebase for this. Read relevant code, share your initial findings, and ask clarifying questions.\n\n${systemPrompt}`,
+    cwd,
+    config,
+  })
 
-  spawnSync("claude", [
-    "-p", `${task}${repoContext}\n\nExplore the codebase for this. Read relevant code, share your initial findings, and ask clarifying questions.`,
-    "--session-id", sessionId,
-    "--append-system-prompt", systemPrompt,
-    "--dangerously-skip-permissions",
-  ], { cwd, stdio: "inherit" })
+  if (result.isError) {
+    console.error("  Discovery failed. Output:", result.output)
+  }
 
   // Step 2: Resume interactively — user continues the conversation with full context
-  console.log("\n  Entering interactive mode. Type /exit when ready to proceed to planning.\n")
-
-  spawnSync("claude", ["--resume", sessionId], {
-    cwd,
-    stdio: "inherit",
-  })
+  if (result.sessionId) {
+    console.log("\n  Entering interactive mode. Type /exit when ready to proceed to planning.\n")
+    spawnSync("claude", ["--resume", result.sessionId], {
+      cwd,
+      stdio: "inherit",
+    })
+  } else {
+    console.error("  No session ID from discovery. Falling back to fresh session.\n")
+    spawnSync("claude", ["--append-system-prompt", systemPrompt], { cwd, stdio: "inherit" })
+  }
 }
 
 // ========= Interactive Session =========
@@ -522,7 +527,7 @@ const run = async (task: string, config: Config): Promise<void> => {
 
   // Phase 0: Discovery chat
   if (!config.skipChat) {
-    runDiscovery(cwd, task, repos)
+    await runDiscovery(cwd, task, repos, config)
   }
 
   // Phase 1: Planner
