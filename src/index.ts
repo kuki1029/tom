@@ -2,6 +2,7 @@
 
 import fs from "node:fs"
 import path from "node:path"
+import crypto from "node:crypto"
 import readline from "node:readline"
 import { execSync, spawnSync } from "node:child_process"
 import { parseArgs } from "node:util"
@@ -388,24 +389,24 @@ const runDiscovery = (cwd: string, task: string, repos: string[]): void => {
     "This document feeds directly into the planner. Be precise.",
   ].join("\n")
 
-  // Put the task in the system prompt so Claude has it as context
-  // and immediately starts exploring when the user sends any message
-  const fullPrompt = [
-    systemPrompt,
-    "",
-    `## Task to explore`,
-    "",
-    `${task}${repoContext}`,
-    "",
-    "Start by reading the relevant code for this task. Share your initial findings and ask clarifying questions.",
-    "The user's first message will kick things off — dive straight into exploring.",
-  ].join("\n")
-
   printPhaseBanner("DISCOVERY")
-  console.log("  Chat with the architect. Explore the codebase, refine the task.")
-  console.log("  Type /exit when ready to proceed to planning.\n")
+  console.log("  Exploring the codebase. You'll be able to chat after.\n")
 
-  spawnSync("claude", ["--append-system-prompt", fullPrompt], {
+  // Step 1: Auto-explore with -p — user sees output in real time (stdio inherit)
+  // Use a fixed session ID so we can resume it
+  const sessionId = crypto.randomUUID()
+
+  spawnSync("claude", [
+    "-p", `${task}${repoContext}\n\nExplore the codebase for this. Read relevant code, share your initial findings, and ask clarifying questions.`,
+    "--session-id", sessionId,
+    "--append-system-prompt", systemPrompt,
+    "--dangerously-skip-permissions",
+  ], { cwd, stdio: "inherit" })
+
+  // Step 2: Resume interactively — user continues the conversation with full context
+  console.log("\n  Entering interactive mode. Type /exit when ready to proceed to planning.\n")
+
+  spawnSync("claude", ["--resume", sessionId], {
     cwd,
     stdio: "inherit",
   })
