@@ -28,9 +28,9 @@ Your primary testing method: **write executable test scripts** that produce conc
 
    test('shows indicator when enabled', async ({ mount }) => {
      const component = await mount(
-       <SignaturePreview signature="Best regards" sentWithErgo={true} />
+       <UserCard name="Jane Smith" role="admin" showBadge={true} />
      )
-     await expect(component.getByText('Sent with Ergo')).toBeVisible()
+     await expect(component.getByText('Admin')).toBeVisible()
      await component.screenshot({ path: '.tom/screenshots/C5-enabled.png' })
    })
    ```
