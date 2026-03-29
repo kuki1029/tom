@@ -42,10 +42,14 @@ cd tom && npm install && npm link
 ```bash
 tom "your task"         # full pipeline (discovery → plan → build → eval → review)
 tom -s "clear task"     # skip discovery, go straight to planning
+tom -i 1234             # fetch Linear issue and use as task
 tom --plan-only "task"  # just plan, don't build
 tom --continue          # resume from where you left off
 tom status              # show current .tom/ state
+tom watch               # monitor all sessions across worktrees
 tom pr                  # organize commits + create PR
+tom sync                # merge latest main into current branch
+tom sync branch-name    # switch to branch (create if needed) + merge main
 ```
 
 ## Pipeline
@@ -78,17 +82,36 @@ tom "add retry logic"
 
 ## Configuration
 
-Create `.tom/config.json` in your project root:
+Tom uses two config files. Global loads first, project overrides.
+
+### Global Config (`~/.tom/config.json`)
+
+Settings that apply everywhere — your identity, model, integrations:
 
 ```json
 {
   "branchPrefix": "yourname/feat-",
   "model": "opus",
-  "maxIterations": 4,
-  "skipChat": false,
-  "customPrompt": "Project-specific instructions for all agents."
+  "linearTeam": "ENG",
+  "reviewCommand": "/tira-review"
 }
 ```
+
+### Project Config (`.tom/config.json`)
+
+Project-specific settings — custom prompts, repo branches:
+
+```json
+{
+  "customPrompt": "Use MongoDB MCP to verify DB state.",
+  "repoBranches": { "automations": "staging" },
+  "baseBranch": "main"
+}
+```
+
+See [`config.example.json`](config.example.json) for a full example.
+
+### All Config Options
 
 | Key | Description | Default |
 |-----|-------------|---------|
@@ -96,19 +119,26 @@ Create `.tom/config.json` in your project root:
 | `model` | Claude model for all agents | `opus` |
 | `maxIterations` | Max generate-evaluate loops | `4` |
 | `skipChat` | Skip discovery chat by default | `false` |
+| `linearTeam` | Linear team prefix (e.g. `ENG`) | - |
+| `reviewCommand` | Custom review command (e.g. `/tira-review`) | built-in reviewer |
+| `baseBranch` | Default base branch | `main` |
+| `repoBranches` | Per-repo base branch overrides | `{}` |
 | `customPrompt` | Appended to all agent prompts | - |
 
-### Custom Prompt
+### Linear Integration
 
-Use `customPrompt` for project-specific instructions that all agents should follow:
+Fetch issues directly as tasks:
 
-```json
-{
-  "customPrompt": "Use MongoDB MCP to verify DB state. For auth testing, use getDemoToken() from src/helpers/auth.ts. DO NOT use Playwright for full-page navigation — use Component Testing instead."
-}
+```bash
+tom -i 1234           # fetches ENG-1234 (uses linearTeam from config)
+tom -i ENG-1234       # explicit team prefix
 ```
 
-See [`config.example.json`](config.example.json) for a full example. Copy it to `.tom/config.json` and customize.
+Requires `LINEAR_API_KEY` env var. Get your key from Linear → Settings → API → Personal API Keys.
+
+```bash
+echo 'export LINEAR_API_KEY="lin_api_..."' >> ~/.zshrc && source ~/.zshrc
+```
 
 CLI flags override config values.
 
@@ -126,6 +156,7 @@ CLI flags override config values.
 | `--no-review` | | Skip code review phase |
 | `--quiet` | `-q` | Suppress agent output |
 | `--continue` | | Resume previous run |
+| `--issue <id>` | `-i` | Fetch Linear issue as task |
 | `--mcp-config <path>` | | MCP config for evaluator |
 | `--max-budget-usd <n>` | | Total budget cap |
 
