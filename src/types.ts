@@ -32,7 +32,23 @@ export interface AgentResult {
   isError: boolean
 }
 
-export type AgentRole = "discovery" | "planner" | "generator" | "evaluator" | "reviewer" | "pr"
+export type AgentRole = "discovery" | "planner" | "generator" | "evaluator" | "reviewer" | "pr" | "postmortem"
+
+export type LearningCategory = "types" | "patterns" | "testing" | "architecture" | "style" | "performance" | "other"
+
+export interface Learning {
+  id: string
+  source: "evaluator" | "reviewer" | "interactive"
+  project: string
+  task: string
+  date: string
+  learning: string
+  category: LearningCategory
+}
+
+export interface Memory {
+  learnings: Learning[]
+}
 
 export interface CritiqueResult {
   id: string

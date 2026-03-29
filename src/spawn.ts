@@ -2,6 +2,7 @@ import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import path from "node:path"
 import type { AgentRole, AgentResult, Config } from "./types.js"
+import { loadMemory, formatMemoryForPrompt, detectProjectName } from "./memory.js"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PROMPTS_DIR = path.join(__dirname, "prompts")
@@ -30,12 +31,36 @@ const buildBasePrompt = (role: AgentRole, task: string, cwd: string, iteration: 
         ?? `Task: ${task}\n\nReview all changes made in this session. Read .tom/plan.md and .tom/contract.json for context. Write your review to .tom/review.md.`
     case "pr":
       return `Organize commits, push the branch, and create a pull request. Read .tom/ artifacts for context.`
+    case "postmortem":
+      return `Analyze the pipeline results and extract learnings. Read .tom/critique.md, .tom/review.md, and ~/.tom/memory.json.`
   }
 }
 
-const buildUserPrompt = (role: AgentRole, task: string, cwd: string, iteration: number, config: Config): string => {
+const buildUserPrompt = (role: AgentRole, task: string, cwd: string, iteration: number, config: Config, extraContext?: Record<string, string>): string => {
   const base = buildBasePrompt(role, task, cwd, iteration, config)
-  return config.customPrompt ? `${base}\n\nProject-specific instructions:\n${config.customPrompt}` : base
+  const withCustom = config.customPrompt ? `${base}\n\nProject-specific instructions:\n${config.customPrompt}` : base
+
+  // Inject memory for planner and generator
+  if (role === "planner" || role === "generator") {
+    const memory = loadMemory()
+    const memoryBlock = formatMemoryForPrompt(memory, detectProjectName(cwd))
+    return memoryBlock ? `${withCustom}\n${memoryBlock}` : withCustom
+  }
+
+  // Inject context for post-mortem (manual diff + project name)
+  if (role === "postmortem" && extraContext) {
+    const parts = [withCustom]
+    if (extraContext.project) parts.push(`Project name: ${extraContext.project}`)
+    if (extraContext.task) parts.push(`Task: ${extraContext.task}`)
+    if (extraContext.manualDiff) {
+      parts.push(`\nManual fixes made by the user after the pipeline finished (git diff):\n\`\`\`\n${extraContext.manualDiff}\n\`\`\``)
+    } else {
+      parts.push("\nNo manual fixes were made after the pipeline finished.")
+    }
+    return parts.join("\n\n")
+  }
+
+  return withCustom
 }
 
 interface SpawnOptions {
@@ -45,6 +70,7 @@ interface SpawnOptions {
   config: Config
   iteration?: number
   resumeSessionId?: string
+  extraContext?: Record<string, string>
 }
 
 const DIM = "\x1b[2m"
@@ -128,13 +154,13 @@ const formatEvent = (event: StreamEvent): string[] => {
   return lines
 }
 
-export const spawnAgent = ({ role, task, cwd, config, iteration = 0, resumeSessionId }: SpawnOptions): Promise<AgentResult> => {
+export const spawnAgent = ({ role, task, cwd, config, iteration = 0, resumeSessionId, extraContext }: SpawnOptions): Promise<AgentResult> => {
   return new Promise((resolve, reject) => {
     const isResume = !!resumeSessionId
 
     const args = [
       // Resume existing session or start fresh
-      ...(isResume ? ["--resume", resumeSessionId, "-p", task] : ["-p", buildUserPrompt(role, task, cwd, iteration, config)]),
+      ...(isResume ? ["--resume", resumeSessionId, "-p", task] : ["-p", buildUserPrompt(role, task, cwd, iteration, config, extraContext)]),
       "--output-format", "stream-json",
       "--verbose",
       "--model", config.model,

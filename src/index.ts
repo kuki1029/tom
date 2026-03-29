@@ -17,6 +17,7 @@ import {
   printCostSummary,
   printStatus,
 } from "./display.js"
+import { detectProjectName, printMemory, printLastLearnings, clearMemory } from "./memory.js"
 
 // ========= Config =========
 
@@ -71,7 +72,7 @@ const fetchLinearIssue = async (issueId: string, team?: string): Promise<string>
   const identifier = issueId.match(/^[A-Z]+-\d+$/i) ? issueId
     : team ? `${team}-${issueId}` : issueId
 
-  const query = `{ issueSearch(query: "${identifier}", first: 1) { nodes { identifier title description comments { nodes { body } } } } }`
+  const query = `{ issue(id: "${identifier}") { identifier title description comments { nodes { body } } } }`
 
   const res = await fetch("https://api.linear.app/graphql", {
     method: "POST",
@@ -79,9 +80,9 @@ const fetchLinearIssue = async (issueId: string, team?: string): Promise<string>
     body: JSON.stringify({ query }),
   })
 
-  const data = await res.json() as { data?: { issueSearch?: { nodes?: Array<{ identifier: string; title: string; description?: string; comments?: { nodes?: Array<{ body: string }> } }> } } }
-  const issue = data.data?.issueSearch?.nodes?.[0]
-  if (!issue) throw new Error(`Linear issue ${identifier} not found`)
+  const data = await res.json() as { data?: { issue?: { identifier: string; title: string; description?: string; comments?: { nodes?: Array<{ body: string }> } } }; errors?: Array<{ message: string }> }
+  const issue = data.data?.issue
+  if (!issue) throw new Error(`Linear issue ${identifier} not found${data.errors?.[0]?.message ? `: ${data.errors[0].message}` : ""}`)
 
   const comments = issue.comments?.nodes?.map(c => c.body).join("\n\n") ?? ""
   const taskText = `[${issue.identifier}] ${issue.title}\n\n${issue.description ?? ""}${comments ? `\n\nComments:\n${comments}` : ""}`
@@ -92,10 +93,17 @@ const fetchLinearIssue = async (issueId: string, team?: string): Promise<string>
 
 // ========= CLI Parsing =========
 
-const SUBCOMMANDS = ["status", "pr", "sync", "watch"] as const
+const SUBCOMMANDS = ["status", "pr", "sync", "watch", "memory", "postmortem"] as const
 type Subcommand = typeof SUBCOMMANDS[number]
 
 const parseCliArgs = (): { task: string; config: Config; subcommand?: Subcommand; issueId?: string } => {
+  // Detect subcommands early — before parseArgs, which throws on unknown flags
+  const rawArgs = process.argv.slice(2)
+  const firstArg = rawArgs[0]
+  if (firstArg && SUBCOMMANDS.includes(firstArg as Subcommand)) {
+    return { task: "", config: DEFAULT_CONFIG, subcommand: firstArg as Subcommand }
+  }
+
   const { values, positionals } = parseArgs({
     allowPositionals: true,
     options: {
@@ -116,12 +124,6 @@ const parseCliArgs = (): { task: string; config: Config; subcommand?: Subcommand
     },
   })
 
-  // Check for subcommand
-  const firstArg = positionals[0]
-  if (firstArg && SUBCOMMANDS.includes(firstArg as Subcommand)) {
-    return { task: "", config: DEFAULT_CONFIG, subcommand: firstArg as Subcommand }
-  }
-
   if (values.help || (positionals.length === 0 && !values.continue && !values.issue)) {
     console.log(`
   tom <task> [options]
@@ -129,6 +131,8 @@ const parseCliArgs = (): { task: string; config: Config; subcommand?: Subcommand
   tom pr                        Create PR from .tom/ artifacts
   tom sync [branch]             Fetch main + merge into current (or given) branch
   tom watch                     Monitor all tom sessions across worktrees
+  tom memory                    Show all learnings (--clear, --last, or project name)
+  tom postmortem                Run post-mortem standalone (needs .tom/critique.md)
 
   Arguments:
     task                    What to build (quoted string)
@@ -182,6 +186,15 @@ const parseCliArgs = (): { task: string; config: Config; subcommand?: Subcommand
 }
 
 // ========= Utilities =========
+
+/** Run a shell command, returning stdout or empty string on failure. */
+const safeExec = (cmd: string, cwd: string): string => {
+  try {
+    return execSync(cmd, { cwd, stdio: "pipe" }).toString().trim()
+  } catch {
+    return ""
+  }
+}
 
 /** Extract a human-readable message from execSync errors (which carry stderr as a Buffer). */
 const getExecError = (err: unknown): string => {
@@ -597,7 +610,7 @@ const runDiscovery = async (cwd: string, task: string, repos: string[], config: 
     "",
     "## When the user is ready to proceed",
     "",
-    "Before they /exit, write .tom/discovery.md containing:",
+    `Before they /exit, write ${path.join(cwd, ".tom", "discovery.md")} containing:`,
     "- **Refined task**: what exactly we're building (specific, not vague)",
     "- **Key findings**: what we learned about the codebase that matters for this task",
     "- **Agreed approach**: the architecture/design decision made during discussion",
@@ -637,7 +650,7 @@ const runDiscovery = async (cwd: string, task: string, repos: string[], config: 
       console.log("\n  Writing discovery summary...\n")
       spawnSync("claude", [
         "--resume", result.sessionId,
-        "-p", "Write .tom/discovery.md now with everything we discussed. Include: refined task, key findings, agreed approach, files involved, risks, and out of scope.",
+        "-p", `Write ${path.join(cwd, ".tom", "discovery.md")} now with everything we discussed. Include: refined task, key findings, agreed approach, files involved, risks, and out of scope.`,
         "--dangerously-skip-permissions",
         "--no-session-persistence",
       ], { cwd, stdio: "inherit" })
@@ -703,7 +716,7 @@ const run = async (task: string, config: Config): Promise<void> => {
   // Handle --continue
   if (config.continueRun) {
     const tomDir = path.join(cwd, ".tom")
-    if (!fs.existsSync(path.join(tomDir, "contract.json"))) {
+    if (!fs.existsSync(tomDir)) {
       console.error("No .tom/ state found. Run tom with a task first.")
       process.exit(1)
     }
@@ -714,6 +727,31 @@ const run = async (task: string, config: Config): Promise<void> => {
       console.log("Previous run passed all criteria. Opening interactive session.\n")
       if (!config.noInteractive) openInteractiveSession(cwd)
       return
+    }
+
+    // No contract yet — re-run planner (picks up discovery.md if present)
+    if (state === "plan") {
+      const discoveryPath = path.join(tomDir, "discovery.md")
+      const discoveryContext = fs.existsSync(discoveryPath)
+        ? `\n\nDiscovery notes:\n${fs.readFileSync(discoveryPath, "utf-8")}`
+        : ""
+      const repoContext = repos.length > 1
+        ? `\n\nThis project has multiple repos: ${repos.join(", ")}. Plan changes across repos as needed.`
+        : ""
+
+      printPhaseBanner("PLANNER (resumed)")
+      const plannerResult = await spawnAgent({
+        role: "planner",
+        task: (task || "Continue planning based on discovery notes.") + repoContext + discoveryContext,
+        cwd,
+        config,
+      })
+      results.push(plannerResult)
+
+      if (plannerResult.isError || !fs.existsSync(path.join(tomDir, "contract.json"))) {
+        console.error("Planner did not produce a contract. Check output above.")
+        process.exit(1)
+      }
     }
 
     const contract = parseContract(tomDir)
@@ -759,8 +797,17 @@ const run = async (task: string, config: Config): Promise<void> => {
   // Phase 0: Discovery chat
   if (!config.skipChat) {
     await runDiscovery(cwd, task, repos, config)
-    if (!fs.existsSync(path.join(tomDir, "discovery.md"))) {
-      console.log("  Note: no discovery.md written. Planner will work from the task description alone.\n")
+    // Discovery agent might write discovery.md inside a sub-repo (e.g. backend/.tom/discovery.md)
+    const rootDiscovery = path.join(tomDir, "discovery.md")
+    if (!fs.existsSync(rootDiscovery)) {
+      const subRepoDiscovery = repos
+        .map(r => path.join(cwd, r, ".tom", "discovery.md"))
+        .find(p => fs.existsSync(p))
+      if (subRepoDiscovery) {
+        fs.copyFileSync(subRepoDiscovery, rootDiscovery)
+      } else {
+        console.log("  Note: no discovery.md written. Planner will work from the task description alone.\n")
+      }
     }
   }
 
@@ -876,11 +923,31 @@ const run = async (task: string, config: Config): Promise<void> => {
   printCostSummary(results)
   notify("Tom", "Pipeline complete")
 
+  // Capture SHA before interactive — so post-mortem can diff manual fixes
+  const preInteractiveSha = safeExec("git rev-parse HEAD", cwd)
+
   // Phase 5: Interactive session
   if (!config.noInteractive) {
     console.log("Opening interactive Claude session...\n")
     openInteractiveSession(cwd)
   }
+
+  // Phase 6: Post-mortem — extract learnings from this run
+  const project = detectProjectName(cwd)
+  const manualDiff = preInteractiveSha
+    ? safeExec(`git diff ${preInteractiveSha} HEAD`, cwd)
+    : ""
+
+  printPhaseBanner("POST-MORTEM")
+  const postMortemResult = await spawnAgent({
+    role: "postmortem",
+    task,
+    cwd,
+    config,
+    extraContext: { project, task, manualDiff: manualDiff ?? "" },
+  })
+  results.push(postMortemResult)
+  console.log("  Run 'tom memory' to see what was learned.\n")
 }
 
 // ========= Entry =========
@@ -905,6 +972,32 @@ if (subcommand === "status") {
   runWatch(process.cwd())
 } else if (subcommand === "pr") {
   createPR(process.cwd(), config).catch((err) => {
+    console.error(`\nFatal: ${err.message}`)
+    process.exit(1)
+  })
+} else if (subcommand === "memory") {
+  const arg = process.argv[process.argv.indexOf("memory") + 1]
+  if (arg === "--clear") clearMemory()
+  else if (arg === "--last") printLastLearnings()
+  else printMemory(arg) // arg is optional project filter
+} else if (subcommand === "postmortem") {
+  const cwd = process.cwd()
+  const tomDir = path.join(cwd, ".tom")
+  if (!fs.existsSync(path.join(tomDir, "critique.md"))) {
+    console.error("Fatal: .tom/critique.md not found. Run a pipeline first or create one for testing.")
+    process.exit(1)
+  }
+  const project = detectProjectName(cwd)
+  printPhaseBanner("POST-MORTEM")
+  spawnAgent({
+    role: "postmortem",
+    task: "standalone post-mortem",
+    cwd,
+    config,
+    extraContext: { project, task: "standalone post-mortem" },
+  }).then(() => {
+    console.log("  Post-mortem complete. Run 'tom memory' to see learnings.\n")
+  }).catch((err) => {
     console.error(`\nFatal: ${err.message}`)
     process.exit(1)
   })
