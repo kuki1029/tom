@@ -584,11 +584,23 @@ const runDiscovery = async (cwd: string, task: string, repos: string[], config: 
 
   // Step 2: Resume interactively — user continues the conversation with full context
   if (result.sessionId) {
-    console.log("\n  Entering interactive mode. Say \"write discovery doc\" then /exit when ready.\n")
+    console.log("\n  Entering interactive mode. /exit when ready to proceed.\n")
     spawnSync("claude", ["--resume", result.sessionId], {
       cwd,
       stdio: "inherit",
     })
+
+    // Step 3: Auto-write discovery.md if the user forgot
+    const discoveryPath = path.join(cwd, ".tom", "discovery.md")
+    if (!fs.existsSync(discoveryPath)) {
+      console.log("\n  Writing discovery summary...\n")
+      spawnSync("claude", [
+        "--resume", result.sessionId,
+        "-p", "Write .tom/discovery.md now with everything we discussed. Include: refined task, key findings, agreed approach, files involved, risks, and out of scope.",
+        "--dangerously-skip-permissions",
+        "--no-session-persistence",
+      ], { cwd, stdio: "inherit" })
+    }
   } else {
     console.error("  No session ID from discovery. Falling back to fresh session.\n")
     spawnSync("claude", ["--append-system-prompt", systemPrompt], { cwd, stdio: "inherit" })
