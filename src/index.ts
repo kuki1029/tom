@@ -2,6 +2,7 @@
 
 import fs from "node:fs"
 import path from "node:path"
+import os from "node:os"
 import crypto from "node:crypto"
 import readline from "node:readline"
 import { execSync, spawnSync } from "node:child_process"
@@ -45,15 +46,48 @@ function getDefaultBranchPrefix(): string {
   }
 }
 
-// Load .tom/config.json if it exists, merge with defaults
+// Load ~/.tom/config.json (global) if it exists
+const loadGlobalConfig = (): Partial<Config> => {
+  const configPath = path.join(os.homedir(), ".tom", "config.json")
+  if (!fs.existsSync(configPath)) return {}
+  try { return JSON.parse(fs.readFileSync(configPath, "utf-8")) }
+  catch { return {} }
+}
+
+// Load .tom/config.json (project) if it exists
 const loadProjectConfig = (cwd: string): Partial<Config> => {
   const configPath = path.join(cwd, ".tom", "config.json")
   if (!fs.existsSync(configPath)) return {}
-  try {
-    return JSON.parse(fs.readFileSync(configPath, "utf-8"))
-  } catch {
-    return {}
-  }
+  try { return JSON.parse(fs.readFileSync(configPath, "utf-8")) }
+  catch { return {} }
+}
+
+// Fetch a Linear issue by ID
+const fetchLinearIssue = async (issueId: string, team?: string): Promise<string> => {
+  const apiKey = process.env.LINEAR_API_KEY
+  if (!apiKey) throw new Error("LINEAR_API_KEY env var not set. Add to ~/.zshrc: export LINEAR_API_KEY=\"lin_api_...\"")
+
+  // Add team prefix if it's just a number
+  const identifier = issueId.match(/^[A-Z]+-\d+$/i) ? issueId
+    : team ? `${team}-${issueId}` : issueId
+
+  const query = `{ issueSearch(query: "${identifier}", first: 1) { nodes { identifier title description comments { nodes { body } } } } }`
+
+  const res = await fetch("https://api.linear.app/graphql", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: apiKey },
+    body: JSON.stringify({ query }),
+  })
+
+  const data = await res.json() as { data?: { issueSearch?: { nodes?: Array<{ identifier: string; title: string; description?: string; comments?: { nodes?: Array<{ body: string }> } }> } } }
+  const issue = data.data?.issueSearch?.nodes?.[0]
+  if (!issue) throw new Error(`Linear issue ${identifier} not found`)
+
+  const comments = issue.comments?.nodes?.map(c => c.body).join("\n\n") ?? ""
+  const taskText = `[${issue.identifier}] ${issue.title}\n\n${issue.description ?? ""}${comments ? `\n\nComments:\n${comments}` : ""}`
+
+  console.log(`  Fetched: ${issue.identifier} — ${issue.title}\n`)
+  return taskText
 }
 
 // ========= CLI Parsing =========
@@ -61,7 +95,7 @@ const loadProjectConfig = (cwd: string): Partial<Config> => {
 const SUBCOMMANDS = ["status", "pr", "sync", "watch"] as const
 type Subcommand = typeof SUBCOMMANDS[number]
 
-const parseCliArgs = (): { task: string; config: Config; subcommand?: Subcommand } => {
+const parseCliArgs = (): { task: string; config: Config; subcommand?: Subcommand; issueId?: string } => {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
     options: {
@@ -75,6 +109,7 @@ const parseCliArgs = (): { task: string; config: Config; subcommand?: Subcommand
       "skip-chat": { type: "boolean", short: "s", default: false },
       quiet: { type: "boolean", short: "q", default: false },
       continue: { type: "boolean", default: false },
+      issue: { type: "string", short: "i" },
       "mcp-config": { type: "string" },
       "max-budget-usd": { type: "string" },
       help: { type: "boolean", short: "h", default: false },
@@ -87,7 +122,7 @@ const parseCliArgs = (): { task: string; config: Config; subcommand?: Subcommand
     return { task: "", config: DEFAULT_CONFIG, subcommand: firstArg as Subcommand }
   }
 
-  if (values.help || (positionals.length === 0 && !values.continue)) {
+  if (values.help || (positionals.length === 0 && !values.continue && !values.issue)) {
     console.log(`
   tom <task> [options]
   tom status                    Show current .tom/ state
@@ -109,6 +144,7 @@ const parseCliArgs = (): { task: string; config: Config; subcommand?: Subcommand
     -s, --skip-chat         Skip discovery chat, go straight to planning
     --quiet, -q             Suppress agent output (default: show everything)
     --continue              Resume from last run's .tom/ state
+    -i, --issue <id>        Fetch Linear issue as task (e.g. 1234 or ENG-1234)
     --mcp-config <path>     MCP config for evaluator (Playwright, etc.)
     --max-budget-usd <n>    Total budget cap across all agents
     -h, --help              Show this help
@@ -116,10 +152,12 @@ const parseCliArgs = (): { task: string; config: Config; subcommand?: Subcommand
     process.exit(0)
   }
 
-  // Merge: defaults ← project config ← CLI flags
+  // Merge: defaults ← global config ← project config ← CLI flags
+  const globalConfig = loadGlobalConfig()
   const projectConfig = loadProjectConfig(process.cwd())
   const config: Config = {
     ...DEFAULT_CONFIG,
+    ...globalConfig,
     ...projectConfig,
     ...(values.model && { model: values.model }),
     ...(values["max-iterations"] && { maxIterations: parseInt(values["max-iterations"], 10) }),
@@ -137,7 +175,10 @@ const parseCliArgs = (): { task: string; config: Config; subcommand?: Subcommand
       : undefined,
   }
 
-  return { task: positionals.join(" "), config }
+  const task = positionals.join(" ")
+  const issueId = values.issue as string | undefined
+
+  return { task, config, issueId }
 }
 
 // ========= Utilities =========
@@ -844,7 +885,15 @@ const run = async (task: string, config: Config): Promise<void> => {
 
 // ========= Entry =========
 
-const { task, config, subcommand } = parseCliArgs()
+const { task, config, subcommand, issueId } = parseCliArgs()
+
+// Resolve task from --issue flag if provided
+const resolveTask = async (): Promise<string> => {
+  if (issueId) {
+    return fetchLinearIssue(issueId, config.linearTeam)
+  }
+  return task
+}
 
 if (subcommand === "status") {
   printStatus(process.cwd())
@@ -860,8 +909,10 @@ if (subcommand === "status") {
     process.exit(1)
   })
 } else {
-  run(task, config).catch((err) => {
-    console.error(`\nFatal: ${err.message}`)
-    process.exit(1)
-  })
+  resolveTask()
+    .then((resolvedTask) => run(resolvedTask, config))
+    .catch((err) => {
+      console.error(`\nFatal: ${err.message}`)
+      process.exit(1)
+    })
 }

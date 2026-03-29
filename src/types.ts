@@ -59,6 +59,7 @@ export interface Config {
   baseBranch: string
   repoBranches: Record<string, string>
   skipChat: boolean
+  linearTeam?: string
   customPrompt?: string
   reviewCommand?: string
   mcpConfig?: string
