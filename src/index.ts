@@ -584,7 +584,7 @@ const runDiscovery = async (cwd: string, task: string, repos: string[], config: 
 
   // Step 2: Resume interactively — user continues the conversation with full context
   if (result.sessionId) {
-    console.log("\n  Entering interactive mode. Type /exit when ready to proceed to planning.\n")
+    console.log("\n  Entering interactive mode. Say \"write discovery doc\" then /exit when ready.\n")
     spawnSync("claude", ["--resume", result.sessionId], {
       cwd,
       stdio: "inherit",
@@ -706,6 +706,9 @@ const run = async (task: string, config: Config): Promise<void> => {
   // Phase 0: Discovery chat
   if (!config.skipChat) {
     await runDiscovery(cwd, task, repos, config)
+    if (!fs.existsSync(path.join(tomDir, "discovery.md"))) {
+      console.log("  Note: no discovery.md written. Planner will work from the task description alone.\n")
+    }
   }
 
   // Phase 1: Planner
