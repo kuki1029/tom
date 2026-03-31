@@ -17,7 +17,7 @@ import {
   printCostSummary,
   printStatus,
 } from "./display.js"
-import { detectProjectName, printMemory, printLastLearnings, clearMemory } from "./memory.js"
+import { detectProjectName, printMemory, printLastLearnings, clearMemory, deleteLearning, addLearning } from "./memory.js"
 
 // ========= Config =========
 
@@ -93,7 +93,7 @@ const fetchLinearIssue = async (issueId: string, team?: string): Promise<string>
 
 // ========= CLI Parsing =========
 
-const SUBCOMMANDS = ["status", "pr", "sync", "watch", "memory", "postmortem"] as const
+const SUBCOMMANDS = ["status", "pr", "sync", "watch", "memory", "postmortem", "debug"] as const
 type Subcommand = typeof SUBCOMMANDS[number]
 
 const parseCliArgs = (): { task: string; config: Config; subcommand?: Subcommand; issueId?: string } => {
@@ -131,8 +131,9 @@ const parseCliArgs = (): { task: string; config: Config; subcommand?: Subcommand
   tom pr                        Create PR from .tom/ artifacts
   tom sync [branch]             Fetch main + merge into current (or given) branch
   tom watch                     Monitor all tom sessions across worktrees
-  tom memory                    Show all learnings (--clear, --last, or project name)
+  tom memory                    Show all learnings (--clear, --last, --add, --delete)
   tom postmortem                Run post-mortem standalone (needs .tom/critique.md)
+  tom debug [description]       Debug session — reproduce an issue before fixing
 
   Arguments:
     task                    What to build (quoted string)
@@ -258,7 +259,7 @@ const detectRepos = (cwd: string): string[] => {
 // ========= .tom/ Directory =========
 
 const cleanTomDir = (tomDir: string): void => {
-  const artifacts = ["plan.md", "contract.json", "handoff.md", "critique.md", "review.md"]
+  const artifacts = ["plan.md", "contract.json", "handoff.md", "critique.md", "review.md", "discovery.md", "learnings.md", "state.json"]
   for (const file of artifacts) {
     const filePath = path.join(tomDir, file)
     if (fs.existsSync(filePath)) fs.rmSync(filePath)
@@ -664,7 +665,10 @@ const runDiscovery = async (cwd: string, task: string, repos: string[], config: 
 // ========= Interactive Session =========
 
 const openInteractiveSession = (cwd: string): void => {
-  const contextPrompt = [
+  const tomDir = path.join(cwd, ".tom")
+  const hasScreenshots = fs.existsSync(path.join(tomDir, "screenshots", "report.html"))
+
+  const contextLines = [
     "You are continuing a coding session managed by Tom.",
     "Read these files for full context:",
     "- .tom/plan.md — the implementation plan",
@@ -673,22 +677,76 @@ const openInteractiveSession = (cwd: string): void => {
     "- .tom/critique.md — the evaluator's verdict",
     "- .tom/test-scripts/ — test scripts the evaluator wrote and ran",
     "- .tom/review.md — code review findings",
-    "- .tom/screenshots/ — visual test screenshots (if any)",
-    "- .tom/screenshots/report.html — visual report with embedded screenshots (if exists)",
-    "",
-    "The user is here to review. Answer their questions about the implementation.",
-    "If .tom/screenshots/report.html exists, tell the user to open it: open .tom/screenshots/report.html",
-  ].join("\n")
+  ]
 
-  spawnSync("claude", ["--append-system-prompt", contextPrompt], {
+  if (hasScreenshots) {
+    contextLines.push(
+      "- .tom/screenshots/report.html — visual report with embedded screenshots",
+      "",
+      "Tell the user to open the visual report: open .tom/screenshots/report.html",
+    )
+  }
+
+  contextLines.push("", "The user is here to review. Answer their questions about the implementation.")
+
+  const contextPrompt = contextLines.join("\n")
+
+  spawnSync("claude", ["--append-system-prompt", contextPrompt, "--dangerously-skip-permissions"], {
     cwd,
     stdio: "inherit",
   })
 }
 
-// ========= Continue State Detection =========
+// ========= State Persistence =========
 
-const detectContinueState = (tomDir: string): "plan" | "generate" | "evaluate" | "done" => {
+interface PipelineState {
+  phase: "discovery" | "plan" | "generate" | "evaluate" | "review" | "done"
+  iteration: number
+  task: string
+  plannerSessionId?: string
+}
+
+const STATE_FILE = "state.json"
+
+const saveState = (tomDir: string, state: PipelineState): void => {
+  fs.writeFileSync(path.join(tomDir, STATE_FILE), JSON.stringify(state, null, 2))
+}
+
+const loadState = (tomDir: string): PipelineState | null => {
+  const statePath = path.join(tomDir, STATE_FILE)
+  if (!fs.existsSync(statePath)) return null
+  try { return JSON.parse(fs.readFileSync(statePath, "utf-8")) }
+  catch { return null }
+}
+
+const clearState = (tomDir: string): void => {
+  const statePath = path.join(tomDir, STATE_FILE)
+  if (fs.existsSync(statePath)) fs.unlinkSync(statePath)
+}
+
+const isRateLimitError = (result: AgentResult): boolean =>
+  result.isError && (
+    result.output.includes("rate limit") ||
+    result.output.includes("overloaded") ||
+    result.output.includes("quota") ||
+    result.output.includes("capacity") ||
+    result.output.includes("too many requests") ||
+    result.output.includes("429")
+  )
+
+const handleAgentError = (result: AgentResult, tomDir: string, state: PipelineState): void => {
+  saveState(tomDir, state)
+  if (isRateLimitError(result)) {
+    console.error("\n  Hit rate limit. State saved. Resume with: tom --continue\n")
+    notify("Tom", "Rate limited — resume with tom --continue")
+  } else {
+    console.error(`\n  ${result.role} failed. State saved. Resume with: tom --continue\n`)
+    notify("Tom", `${result.role} failed — resume with tom --continue`)
+  }
+}
+
+// Legacy state detection from file artifacts (fallback when state.json doesn't exist)
+const detectContinueState = (tomDir: string): PipelineState["phase"] => {
   const hasCritique = fs.existsSync(path.join(tomDir, "critique.md"))
   const hasHandoff = fs.existsSync(path.join(tomDir, "handoff.md"))
   const hasContract = fs.existsSync(path.join(tomDir, "contract.json"))
@@ -721,16 +779,23 @@ const run = async (task: string, config: Config): Promise<void> => {
       process.exit(1)
     }
 
-    const state = detectContinueState(tomDir)
+    // Load saved state or detect from artifacts
+    const saved = loadState(tomDir)
+    const phase = saved?.phase ?? detectContinueState(tomDir)
+    const savedIteration = saved?.iteration ?? 0
+    const resumeTask = task || saved?.task || ""
 
-    if (state === "done") {
+    console.log(`  Resuming from: ${phase}${savedIteration > 0 ? ` (iteration ${savedIteration + 1})` : ""}\n`)
+
+    if (phase === "done") {
       console.log("Previous run passed all criteria. Opening interactive session.\n")
+      clearState(tomDir)
       if (!config.noInteractive) openInteractiveSession(cwd)
       return
     }
 
-    // No contract yet — re-run planner (picks up discovery.md if present)
-    if (state === "plan") {
+    // Plan phase — re-run planner (picks up discovery.md if present)
+    if (phase === "plan") {
       const discoveryPath = path.join(tomDir, "discovery.md")
       const discoveryContext = fs.existsSync(discoveryPath)
         ? `\n\nDiscovery notes:\n${fs.readFileSync(discoveryPath, "utf-8")}`
@@ -742,49 +807,74 @@ const run = async (task: string, config: Config): Promise<void> => {
       printPhaseBanner("PLANNER (resumed)")
       const plannerResult = await spawnAgent({
         role: "planner",
-        task: (task || "Continue planning based on discovery notes.") + repoContext + discoveryContext,
+        task: (resumeTask || "Continue planning based on discovery notes.") + repoContext + discoveryContext,
         cwd,
         config,
+        resumeSessionId: saved?.plannerSessionId,
       })
       results.push(plannerResult)
 
-      if (plannerResult.isError || !fs.existsSync(path.join(tomDir, "contract.json"))) {
+      if (plannerResult.isError) {
+        handleAgentError(plannerResult, tomDir, { phase: "plan", iteration: 0, task: resumeTask, plannerSessionId: plannerResult.sessionId })
+        process.exit(1)
+      }
+      if (!fs.existsSync(path.join(tomDir, "contract.json"))) {
         console.error("Planner did not produce a contract. Check output above.")
         process.exit(1)
       }
     }
 
     const contract = parseContract(tomDir)
-    const resumeTask = task || contract.task
+    const fullTask = resumeTask || contract.task
 
-    if (state === "evaluate") {
+    // Evaluate phase — run evaluator first, then fall through to generate loop if needed
+    if (phase === "evaluate") {
       printPhaseBanner("EVALUATOR (resumed)")
-      const evalResult = await spawnAgent({ role: "evaluator", task: resumeTask, cwd, config })
+      const evalResult = await spawnAgent({ role: "evaluator", task: fullTask, cwd, config })
       results.push(evalResult)
+      if (evalResult.isError) {
+        handleAgentError(evalResult, tomDir, { phase: "evaluate", iteration: savedIteration, task: fullTask })
+        process.exit(1)
+      }
       const critique = parseCritique(tomDir)
       printCritiqueSummary(critique)
       if (allPassed(critique)) {
+        clearState(tomDir)
         printCostSummary(results)
         if (!config.noInteractive) openInteractiveSession(cwd)
         return
       }
     }
 
-    const startIteration = state === "generate" ? 0 : 1
+    // Generate-evaluate loop
+    const startIteration = phase === "generate" ? savedIteration : (phase === "evaluate" ? savedIteration + 1 : 0)
     for (let iteration = startIteration; iteration < config.maxIterations; iteration++) {
+      saveState(tomDir, { phase: "generate", iteration, task: fullTask })
+
       printPhaseBanner(`GENERATOR (iteration ${iteration + 1})`)
-      const genResult = await spawnAgent({ role: "generator", task: resumeTask, cwd, config, iteration })
+      const genResult = await spawnAgent({ role: "generator", task: fullTask, cwd, config, iteration })
       results.push(genResult)
-      if (genResult.isError) { console.error("Generator failed."); break }
+      if (genResult.isError) {
+        handleAgentError(genResult, tomDir, { phase: "generate", iteration, task: fullTask })
+        process.exit(1)
+      }
+
+      saveState(tomDir, { phase: "evaluate", iteration, task: fullTask })
 
       printPhaseBanner(`EVALUATOR (iteration ${iteration + 1})`)
-      const evalResult = await spawnAgent({ role: "evaluator", task: resumeTask, cwd, config })
+      const evalResult = await spawnAgent({ role: "evaluator", task: fullTask, cwd, config })
       results.push(evalResult)
+      if (evalResult.isError) {
+        handleAgentError(evalResult, tomDir, { phase: "evaluate", iteration, task: fullTask })
+        process.exit(1)
+      }
+
       const critique = parseCritique(tomDir)
       printCritiqueSummary(critique)
       if (allPassed(critique)) { console.log("  All criteria passed.\n"); break }
     }
 
+    clearState(tomDir)
     printCostSummary(results)
     notify("Tom", "Pipeline complete")
     if (!config.noInteractive) openInteractiveSession(cwd)
@@ -812,6 +902,7 @@ const run = async (task: string, config: Config): Promise<void> => {
   }
 
   // Phase 1: Planner
+  saveState(tomDir, { phase: "plan", iteration: 0, task })
   printPhaseBanner("PLANNER")
   const repoContext = repos.length > 1
     ? `\n\nThis project has multiple repos: ${repos.join(", ")}. Plan changes across repos as needed.`
@@ -830,7 +921,7 @@ const run = async (task: string, config: Config): Promise<void> => {
   let plannerSessionId = plannerResult.sessionId
 
   if (plannerResult.isError) {
-    console.error("Planner failed. Check output above for details.")
+    handleAgentError(plannerResult, tomDir, { phase: "plan", iteration: 0, task, plannerSessionId })
     process.exit(1)
   }
 
@@ -882,18 +973,27 @@ const run = async (task: string, config: Config): Promise<void> => {
 
   // Phase 2-3: Generate-Evaluate loop
   for (let iteration = 0; iteration < config.maxIterations; iteration++) {
+    saveState(tomDir, { phase: "generate", iteration, task, plannerSessionId })
+
     printPhaseBanner(`GENERATOR (iteration ${iteration + 1})`)
     const genResult = await spawnAgent({ role: "generator", task, cwd, config, iteration })
     results.push(genResult)
 
     if (genResult.isError) {
-      console.error("Generator failed. Check output above for details.")
+      handleAgentError(genResult, tomDir, { phase: "generate", iteration, task, plannerSessionId })
       break
     }
+
+    saveState(tomDir, { phase: "evaluate", iteration, task, plannerSessionId })
 
     printPhaseBanner(`EVALUATOR (iteration ${iteration + 1})`)
     const evalResult = await spawnAgent({ role: "evaluator", task, cwd, config })
     results.push(evalResult)
+
+    if (evalResult.isError) {
+      handleAgentError(evalResult, tomDir, { phase: "evaluate", iteration, task, plannerSessionId })
+      break
+    }
 
     const critique = parseCritique(tomDir)
     printCritiqueSummary(critique)
@@ -911,6 +1011,8 @@ const run = async (task: string, config: Config): Promise<void> => {
       notify("Tom", `Max iterations reached — some criteria failing`)
     }
   }
+
+  clearState(tomDir)
 
   // Phase 4: Code review
   if (!config.noReview) {
@@ -979,7 +1081,93 @@ if (subcommand === "status") {
   const arg = process.argv[process.argv.indexOf("memory") + 1]
   if (arg === "--clear") clearMemory()
   else if (arg === "--last") printLastLearnings()
+  else if (arg === "--delete") {
+    const id = process.argv[process.argv.indexOf("--delete") + 1]
+    if (!id) { console.error("Usage: tom memory --delete L3"); process.exit(1) }
+    deleteLearning(id)
+  }
+  else if (arg === "--add") {
+    const rest = process.argv.slice(process.argv.indexOf("--add") + 1)
+    const categoryFlag = rest.indexOf("--category")
+    const category = categoryFlag >= 0 ? rest[categoryFlag + 1] : "other"
+    const text = (categoryFlag >= 0 ? rest.slice(0, categoryFlag) : rest).join(" ")
+    if (!text) { console.error("Usage: tom memory --add \"learning text\" --category patterns"); process.exit(1) }
+    addLearning(text, category, process.cwd())
+  }
   else printMemory(arg) // arg is optional project filter
+} else if (subcommand === "debug") {
+  const cwd = process.cwd()
+  const repos = detectRepos(cwd)
+  const repoContext = repos.length > 1 ? `\nRepos: ${repos.join(", ")}` : ""
+  const taskArg = process.argv.slice(process.argv.indexOf("debug") + 1).join(" ")
+  const tomDir = path.join(cwd, ".tom")
+  fs.mkdirSync(tomDir, { recursive: true })
+
+  const debugPrompt = [
+    "You are a senior engineer debugging an issue. Your goal is to reproduce the bug and understand the root cause.",
+    "",
+    "## Process",
+    "",
+    "1. Read the codebase to understand the relevant code paths",
+    "2. Try to reproduce the issue — write scripts, hit endpoints, check DB state, check logs",
+    "3. Once reproduced, trace the root cause",
+    "4. Discuss findings with the user and propose a fix approach",
+    "",
+    "## Tools at your disposal",
+    "",
+    "- Read/search the codebase",
+    "- Write and run test scripts to reproduce",
+    "- Use MCP tools (MongoDB, Playwright, etc.) to inspect state",
+    "- Hit real endpoints, check real data",
+    "",
+    "## Rules",
+    "",
+    "- Do NOT fix the bug yet — just reproduce and understand it",
+    "- Show the user exactly how to reproduce (commands, steps, data)",
+    "- Be specific about the root cause — file, line, logic error",
+  ].join("\n")
+
+  const discoveryPath = path.join(tomDir, "discovery.md")
+
+  printPhaseBanner("DEBUG")
+  console.log("  Debugging session. Reproduce first, fix later.\n")
+
+  // Step 1: Auto-explore with spawnAgent to capture session ID
+  spawnAgent({
+    role: "discovery",
+    task: `${taskArg || "Debug the issue described by the user."}${repoContext}\n\nExplore the codebase to understand the relevant code paths. Try to reproduce the issue. Share your findings and ask clarifying questions.\n\n${debugPrompt}`,
+    cwd,
+    config,
+  }).then((result) => {
+    if (!result.sessionId) {
+      console.error("  No session ID. Opening fresh session.\n")
+      spawnSync("claude", ["--append-system-prompt", debugPrompt, "--dangerously-skip-permissions"], { cwd, stdio: "inherit" })
+      return
+    }
+
+    // Step 2: Interactive debugging — user chats with Claude
+    console.log("\n  Entering interactive mode. /exit when done debugging.\n")
+    spawnSync("claude", ["--resume", result.sessionId], { cwd, stdio: "inherit" })
+
+    // Step 3: Auto-write discovery.md with debug findings
+    if (!fs.existsSync(discoveryPath)) {
+      console.log("\n  Writing debug findings...\n")
+      spawnSync("claude", [
+        "--resume", result.sessionId,
+        "-p", `Write ${discoveryPath} with your debug findings. Include:\n- **Issue**: what the bug is\n- **Reproduction steps**: exact commands/steps to reproduce\n- **Root cause**: file, line, and what's wrong\n- **Proposed fix**: how to fix it (approach, not code)\n- **Scope**: what files need to change\n- **Out of scope**: what NOT to touch\n\nThis feeds directly into the planner. Be precise.`,
+        "--dangerously-skip-permissions",
+        "--no-session-persistence",
+      ], { cwd, stdio: "inherit" })
+    }
+
+    if (fs.existsSync(discoveryPath)) {
+      console.log("  Debug findings saved to .tom/discovery.md")
+      console.log("  Next: run 'tom -s \"fix the issue\"' to start the fix pipeline.\n")
+    }
+  }).catch((err) => {
+    console.error(`\nFatal: ${err.message}`)
+    process.exit(1)
+  })
 } else if (subcommand === "postmortem") {
   const cwd = process.cwd()
   const tomDir = path.join(cwd, ".tom")

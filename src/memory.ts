@@ -2,7 +2,7 @@ import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
 import { execSync } from "node:child_process"
-import type { Memory } from "./types.js"
+import type { Memory, Learning } from "./types.js"
 
 const MEMORY_PATH = path.join(os.homedir(), ".tom", "memory.json")
 
@@ -25,10 +25,25 @@ export const saveMemory = (memory: Memory): void => {
 }
 
 export const detectProjectName = (cwd: string): string => {
+  // Try the cwd itself first
   try {
     const url = execSync("git remote get-url origin", { cwd, stdio: "pipe" }).toString().trim()
     return path.basename(url).replace(/\.git$/, "")
   } catch {
+    // Multi-repo workspace — check sub-dirs for a git remote
+    try {
+      const entries = fs.readdirSync(cwd, { withFileTypes: true })
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue
+        try {
+          const url = execSync("git remote get-url origin", { cwd: path.join(cwd, entry.name), stdio: "pipe" }).toString().trim()
+          // Found a sub-repo — derive workspace name from the org (e.g. "joinergoai" → "Ergo")
+          const repoName = path.basename(url).replace(/\.git$/, "")
+          const parts = repoName.split("-")
+          return parts[0] // e.g. "Ergo-Dashboard-Backend" → "Ergo"
+        } catch { continue }
+      }
+    } catch { /* ignore */ }
     return path.basename(cwd)
   }
 }
@@ -117,6 +132,39 @@ export const printLastLearnings = (): void => {
     console.log(`    ${YELLOW}${l.id}${RESET} ${tag} ${l.learning}`)
   }
   console.log()
+}
+
+export const addLearning = (learning: string, category: string, cwd: string): void => {
+  const memory = loadMemory()
+  const lastId = memory.learnings.length
+    ? parseInt(memory.learnings[memory.learnings.length - 1].id.replace("L", ""))
+    : 0
+  const project = detectProjectName(cwd)
+
+  memory.learnings.push({
+    id: `L${lastId + 1}`,
+    source: "interactive",
+    project,
+    task: "manual",
+    date: new Date().toISOString().split("T")[0],
+    learning,
+    category: (["types", "patterns", "testing", "architecture", "style", "performance"].includes(category) ? category : "other") as Learning["category"],
+  })
+
+  saveMemory(memory)
+  console.log(`  Added L${lastId + 1} [${category}]: ${learning}\n`)
+}
+
+export const deleteLearning = (id: string): void => {
+  const memory = loadMemory()
+  const before = memory.learnings.length
+  memory.learnings = memory.learnings.filter(l => l.id !== id)
+  if (memory.learnings.length === before) {
+    console.log(`  Learning "${id}" not found.\n`)
+  } else {
+    saveMemory(memory)
+    console.log(`  Deleted ${id}.\n`)
+  }
 }
 
 export const clearMemory = (): void => {

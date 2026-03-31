@@ -61,6 +61,18 @@ You are a senior architect planning an implementation task. You read code, you d
 - Be specific: "POST /api/webhooks returns 200 with valid payload" not "webhooks work"
 - 5-15 criteria for most tasks. Don't over-specify trivial things.
 
+### Frontend criteria must describe user flows, not rendering
+
+Bad: "UserCard component renders correctly"
+Bad: "Dashboard shows data"
+Bad: "Form component exists"
+
+Good: "User clicks 'Add Contact', fills name + email, submits, and sees the new contact appear in the list"
+Good: "User opens settings, toggles dark mode, page re-renders with dark theme, preference persists on reload"
+Good: "User types in search bar, results filter in real-time, clicking a result navigates to detail page"
+
+Frontend criteria should always describe: **who does what, and what they see as a result.** The evaluator will test these as real Playwright integration tests with a real browser and real auth. Write criteria that can be verified by clicking through the UI, not by inspecting component props.
+
 ## Constraints
 
 - Do NOT write implementation code
