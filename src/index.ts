@@ -321,7 +321,13 @@ const createBranch = (cwd: string, task: string, prefix: string, repos: string[]
       const msg = getExecError(err)
       try {
         execSync(`git checkout ${branch}`, { cwd: dir, stdio: "pipe" })
-        console.log(`  ${repoName}: switched to existing branch ${branch}`)
+        // Merge latest main so generator doesn't see stale state
+        try {
+          execSync(`git merge origin/${mainBranch} --no-edit`, { cwd: dir, stdio: "pipe" })
+          console.log(`  ${repoName}: switched to ${branch} (merged latest ${mainBranch})`)
+        } catch {
+          console.log(`  ${repoName}: switched to ${branch} (merge conflict — resolve manually)`)
+        }
       } catch {
         console.log(`  ${repoName}: staying on current branch (${msg.trim()})`)
       }
@@ -664,9 +670,16 @@ const runDiscovery = async (cwd: string, task: string, repos: string[], config: 
 
 // ========= Interactive Session =========
 
+const getBranchName = (cwd: string): string =>
+  safeExec("git branch --show-current", cwd) || "tom"
+
 const openInteractiveSession = (cwd: string): void => {
   const tomDir = path.join(cwd, ".tom")
   const hasScreenshots = fs.existsSync(path.join(tomDir, "screenshots", "report.html"))
+  const branch = getBranchName(cwd)
+
+  // Set terminal tab title to branch name
+  process.stdout.write(`\x1b]0;tom: ${branch}\x07`)
 
   const contextLines = [
     "You are continuing a coding session managed by Tom.",
@@ -972,6 +985,7 @@ const run = async (task: string, config: Config): Promise<void> => {
   preflight(cwd, repos)
 
   // Phase 2-3: Generate-Evaluate loop
+  let pipelineFailed = false
   for (let iteration = 0; iteration < config.maxIterations; iteration++) {
     saveState(tomDir, { phase: "generate", iteration, task, plannerSessionId })
 
@@ -981,6 +995,7 @@ const run = async (task: string, config: Config): Promise<void> => {
 
     if (genResult.isError) {
       handleAgentError(genResult, tomDir, { phase: "generate", iteration, task, plannerSessionId })
+      pipelineFailed = true
       break
     }
 
@@ -992,6 +1007,7 @@ const run = async (task: string, config: Config): Promise<void> => {
 
     if (evalResult.isError) {
       handleAgentError(evalResult, tomDir, { phase: "evaluate", iteration, task, plannerSessionId })
+      pipelineFailed = true
       break
     }
 
@@ -1010,6 +1026,11 @@ const run = async (task: string, config: Config): Promise<void> => {
       console.log("  Max iterations reached. Some criteria may still be failing.\n")
       notify("Tom", `Max iterations reached — some criteria failing`)
     }
+  }
+
+  if (pipelineFailed) {
+    printCostSummary(results)
+    return
   }
 
   clearState(tomDir)

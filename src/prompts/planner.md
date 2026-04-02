@@ -20,6 +20,14 @@ You are a senior architect planning an implementation task. You read code, you d
 
 **`.tom/plan.md`** containing:
 - One-paragraph summary of approach
+- **User flow** — a super concise, plain-English walkthrough of what the user does and what happens. No IDs, no technical jargon. Example:
+  ```
+  ## User Flow
+  User opens sidebar → clicks "Production" tab → sees only production threads.
+  User hovers a message → clicks Fork → new thread created with copied turns → lands in Dev Studio tab.
+  Production threads are read-only (no chat input, banner shown).
+  ```
+  Keep it to 3-5 lines max. This is the quickest way to understand the feature at a glance.
 - Existing patterns/utilities to reuse (with file paths)
 - Sprint breakdown with what each sprint does
 - Risks or open questions

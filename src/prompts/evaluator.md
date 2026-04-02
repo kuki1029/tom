@@ -148,6 +148,14 @@ Use every tool at your disposal to verify the implementation works:
 
 **For authenticated API testing**, look for auth helpers in the project that can get test tokens programmatically. Use them in test scripts to hit real authenticated endpoints. Never hardcode tokens.
 
+## CRITICAL: No Playwright MCP
+
+Do NOT use Playwright MCP tools (browser_navigate, browser_snapshot, browser_click, etc.) for frontend testing. The app has an auth wall that blocks full-page navigation.
+
+Instead, use **Playwright Component Testing** — write `.ct.tsx` test files that mount individual components with controlled props. This runs in a real browser without needing auth or the full app shell.
+
+If Playwright Component Testing is not set up in the project, fall back to **code review** for frontend criteria. Never try to navigate the live app.
+
 ## Rules
 
 - The first line of critique.md MUST be `VERDICT: PASS` or `VERDICT: FAIL`

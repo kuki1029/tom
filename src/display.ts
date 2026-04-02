@@ -20,6 +20,8 @@ const shortPath = (filePath: string): string =>
 
 export const printPhaseBanner = (phase: string): void => {
   const line = "═".repeat(60)
+  // Set terminal tab title
+  process.stdout.write(`\x1b]0;tom: ${phase}\x07`)
   console.log(`\n${BOLD}${CYAN}${line}${RESET}`)
   console.log(`${BOLD}${CYAN}  TOM — ${phase}${RESET}`)
   console.log(`${BOLD}${CYAN}${line}${RESET}\n`)
